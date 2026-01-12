@@ -514,6 +514,7 @@ public:
       _shutdown_init = true;  // need to wait for button to be released
       return true;
     }
+
     return false;
   }
 };
@@ -611,6 +612,253 @@ public:
   }
 };
 
+// ====================  TEXT INPUT SCREENS FOR CARDPUTER ====================
+
+#ifdef M5STACK_CARDPUTER_ADV
+
+class TextInputScreen : public UIScreen {
+  UITask* _task;
+  char input_buffer[256];
+  int cursor_pos;
+  int scroll_offset;
+  bool shift_active;
+  ContactInfo* recipient;
+
+public:
+  TextInputScreen(UITask* task) : _task(task) {
+    input_buffer[0] = 0;
+    cursor_pos = 0;
+    scroll_offset = 0;
+    shift_active = false;
+    recipient = NULL;
+  }
+
+  void setRecipient(ContactInfo* r) {
+    recipient = r;
+    input_buffer[0] = 0;
+    cursor_pos = 0;
+    scroll_offset = 0;
+  }
+
+  int render(DisplayDriver& display) override {
+    display.setTextSize(1);
+    display.setColor(DisplayDriver::GREEN);
+    display.setCursor(0, 0);
+
+    if (recipient) {
+      char header[40];
+      snprintf(header, sizeof(header), "To: %.25s", recipient->name);
+      display.print(header);
+    } else {
+      display.print("Compose Message");
+    }
+
+    // Draw horizontal line
+    display.setColor(DisplayDriver::LIGHT);
+    display.drawRect(0, 11, display.width(), 1);
+
+    // Display input text with word wrap
+    display.setCursor(0, 14);
+    display.setColor(DisplayDriver::YELLOW);
+    int text_len = strlen(input_buffer);
+    if (text_len > 0) {
+      display.printWordWrap(input_buffer, display.width());
+    } else {
+      display.setColor(DisplayDriver::DARK);
+      display.print("Type message...");
+    }
+
+    // Show cursor indicator and help text at bottom
+    display.setColor(DisplayDriver::BLUE);
+    display.setCursor(0, display.height() - 10);
+    char status[40];
+    if (shift_active) {
+      snprintf(status, sizeof(status), "SHIFT | %d chars", text_len);
+    } else {
+      snprintf(status, sizeof(status), "Enter=Send Del=Back | %d", text_len);
+    }
+    display.print(status);
+
+    return 200;
+  }
+
+  bool handleInput(char c) override {
+    // Navigation key handling
+    if (c == KEY_PREV || c == KEY_LEFT) {
+      _task->gotoHomeScreen();
+      return true;
+    }
+
+    if (c == KEY_ENTER) {
+      if (strlen(input_buffer) > 0 && recipient != NULL) {
+        // Send the message
+        uint32_t timestamp = rtc_clock.getCurrentTime();
+        uint32_t expected_ack = 0;
+        uint32_t est_timeout = 0;
+
+        int result = the_mesh.sendMessage(*recipient, timestamp, 0, input_buffer, expected_ack, est_timeout);
+
+        if (result >= 0) {
+          _task->showAlert("Message sent!", 2000);
+        } else {
+          _task->showAlert("Send failed", 2000);
+        }
+
+        _task->gotoHomeScreen();
+        return true;
+      } else if (recipient == NULL) {
+        _task->showAlert("No recipient!", 2000);
+      }
+      return true;
+    }
+
+    // Check for actual keyboard input from Cardputer
+    if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+      auto& status = M5Cardputer.Keyboard.keysState();
+
+      // Handle special keys
+      if (status.del || status.word[0] == '\b') {
+        if (cursor_pos > 0) {
+          // Delete character
+          cursor_pos--;
+          input_buffer[cursor_pos] = 0;
+        }
+        return true;
+      }
+
+      // Check for Shift/Fn key
+      if (status.fn) {
+        shift_active = !shift_active;
+        return true;
+      }
+
+      // Handle regular character input
+      // In text input mode, we want to capture all printable characters
+      for (char ch : status.word) {
+        if (ch == 0) break;
+
+        // Skip special characters that might cause issues
+        if (ch == '\r' || ch == '\n' || ch == '\t') {
+          continue;
+        }
+
+        if (cursor_pos < sizeof(input_buffer) - 1) {
+          if (shift_active && ch >= 'a' && ch <= 'z') {
+            input_buffer[cursor_pos++] = ch - 32;  // Convert to uppercase
+            shift_active = false;
+          } else {
+            input_buffer[cursor_pos++] = ch;
+          }
+          input_buffer[cursor_pos] = 0;
+        }
+      }
+
+      return true;
+    }
+
+    return false;
+  }
+};
+
+class ContactSelectScreen : public UIScreen {
+  UITask* _task;
+  TextInputScreen* _text_input;
+  ContactInfo contacts[10];
+  int num_contacts;
+  int selected_idx;
+
+public:
+  ContactSelectScreen(UITask* task, TextInputScreen* text_input)
+    : _task(task), _text_input(text_input), num_contacts(0), selected_idx(0) {}
+
+  void refresh() {
+    // Get recent contacts from the mesh
+    AdvertPath recent[10];
+    the_mesh.getRecentlyHeard(recent, 10);
+
+    num_contacts = 0;
+    for (int i = 0; i < 10; i++) {
+      if (recent[i].name[0] != 0) {
+        // Look up full contact info
+        ContactInfo* c = the_mesh.lookupContactByPubKey(recent[i].pubkey_prefix, 7);
+        if (c != NULL) {
+          contacts[num_contacts++] = *c;
+        }
+      }
+    }
+
+    selected_idx = 0;
+  }
+
+  int render(DisplayDriver& display) override {
+    display.setTextSize(1);
+    display.setColor(DisplayDriver::GREEN);
+    display.setCursor(0, 0);
+    display.print("Select Recipient:");
+
+    display.setColor(DisplayDriver::LIGHT);
+    display.drawRect(0, 11, display.width(), 1);
+
+    int y = 14;
+    for (int i = 0; i < num_contacts && i < 4; i++) {
+      if (i == selected_idx) {
+        display.setColor(DisplayDriver::YELLOW);
+        display.setCursor(0, y);
+        display.print(">");
+      } else {
+        display.setColor(DisplayDriver::LIGHT);
+      }
+
+      display.setCursor(8, y);
+      char line[40];
+      snprintf(line, sizeof(line), "%.30s", contacts[i].name);
+      display.print(line);
+      y += 11;
+    }
+
+    if (num_contacts == 0) {
+      display.setColor(DisplayDriver::RED);
+      display.setCursor(0, 20);
+      display.print("No contacts found");
+      display.setCursor(0, 32);
+      display.print("Press ESC to go back");
+    }
+
+    return 500;
+  }
+
+  bool handleInput(char c) override {
+    if (c == KEY_PREV || c == KEY_LEFT) {
+      _task->gotoHomeScreen();
+      return true;
+    }
+
+    if (c == KEY_UP) {
+      if (selected_idx > 0) selected_idx--;
+      return true;
+    }
+
+    if (c == KEY_DOWN) {
+      if (selected_idx < num_contacts - 1) selected_idx++;
+      return true;
+    }
+
+    if (c == KEY_ENTER || c == KEY_RIGHT) {
+      if (num_contacts > 0 && selected_idx < num_contacts) {
+        _text_input->setRecipient(&contacts[selected_idx]);
+        _task->setCurrScreen(_text_input);
+      }
+      return true;
+    }
+
+    return false;
+  }
+};
+
+#endif  // M5STACK_CARDPUTER_ADV
+
+// ============================================================================
+
 void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs) {
   _display = display;
   _sensors = sensors;
@@ -643,6 +891,12 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   splash = new SplashScreen(this);
   home = new HomeScreen(this, &rtc_clock, sensors, node_prefs);
   msg_preview = new MsgPreviewScreen(this, &rtc_clock);
+
+#ifdef M5STACK_CARDPUTER_ADV
+  text_input = new TextInputScreen(this);
+  contact_select = new ContactSelectScreen(this, (TextInputScreen*)text_input);
+#endif
+
   setCurrScreen(splash);
 }
 
@@ -726,6 +980,13 @@ void UITask::setCurrScreen(UIScreen* c) {
   curr = c;
   _next_refresh = 100;
 }
+
+#ifdef M5STACK_CARDPUTER_ADV
+void UITask::startComposingMessage() {
+  ((ContactSelectScreen*)contact_select)->refresh();
+  setCurrScreen(contact_select);
+}
+#endif
 
 /*
   hardware-agnostic pre-shutdown activity should be done here
@@ -842,11 +1103,28 @@ void UITask::loop() {
 #ifdef M5STACK_CARDPUTER_ADV
   if (c == 0 && M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
     auto& status = M5Cardputer.Keyboard.keysState();
+
+    // Check for 'm' key to start composing (works from home screen only)
+    if (curr == home) {
+      for (char ch : status.word) {
+        if (ch == 'm' || ch == 'M') {
+          if (_display && !_display->isOn()) {
+            _display->turnOn();
+          }
+          startComposingMessage();
+          _auto_off = millis() + AUTO_OFF_MILLIS;
+          _next_refresh = 100;
+          goto done_with_input;  // Skip normal input handling
+        }
+      }
+    }
+
     c = mapCardputerKey(status);
     if (c != 0) {
       c = checkDisplayOn(c);
     }
   }
+done_with_input:
 #endif
 
   if (c != 0 && curr) {
