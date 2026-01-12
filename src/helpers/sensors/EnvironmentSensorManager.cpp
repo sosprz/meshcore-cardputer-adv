@@ -526,6 +526,20 @@ bool EnvironmentSensorManager::setSettingValue(const char* name, const char* val
 }
 
 #if ENV_INCLUDE_GPS
+static bool gps_wait_for_nmea(uint32_t timeout_ms) {
+  uint32_t start = millis();
+  while (millis() - start < timeout_ms) {
+    while (Serial1.available()) {
+      char c = Serial1.read();
+      if (c == '$') {
+        return true;
+      }
+    }
+    delay(10);
+  }
+  return false;
+}
+
 void EnvironmentSensorManager::initBasicGPS() {
 
   Serial1.setPins(PIN_GPS_TX, PIN_GPS_RX);
@@ -534,6 +548,31 @@ void EnvironmentSensorManager::initBasicGPS() {
   Serial1.begin(GPS_BAUD_RATE);
   #else
   Serial1.begin(9600);
+  #endif
+
+  #ifdef GPS_AUTO_BAUD
+  if (!gps_wait_for_nmea(1200)) {
+    const uint32_t rates[] = {9600, 38400, 57600, 115200};
+    bool found = false;
+    for (uint32_t rate : rates) {
+      #ifdef GPS_BAUD_RATE
+      if (rate == GPS_BAUD_RATE) continue;
+      #endif
+      Serial1.begin(rate);
+      if (gps_wait_for_nmea(1200)) {
+        MESH_DEBUG_PRINTLN("GPS baud detected: %lu", (unsigned long)rate);
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      #ifdef GPS_BAUD_RATE
+      Serial1.begin(GPS_BAUD_RATE);
+      #else
+      Serial1.begin(9600);
+      #endif
+    }
+  }
   #endif
 
   // Try to detect if GPS is physically connected to determine if we should expose the setting

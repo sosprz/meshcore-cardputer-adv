@@ -15,9 +15,11 @@
 
 bool ST7789Display::begin() {
   if(!_isOn) {
+  #if defined(PIN_TFT_VDD_CTL) && (PIN_TFT_VDD_CTL >= 0)
     pinMode(PIN_TFT_VDD_CTL, OUTPUT);
-    pinMode(PIN_TFT_LEDA_CTL, OUTPUT);
     digitalWrite(PIN_TFT_VDD_CTL, LOW);
+  #endif
+    pinMode(PIN_TFT_LEDA_CTL, OUTPUT);
   #ifdef PIN_TFT_LEDA_CTL_ACTIVE
     digitalWrite(PIN_TFT_LEDA_CTL, PIN_TFT_LEDA_CTL_ACTIVE);
   #else
@@ -38,7 +40,9 @@ bool ST7789Display::begin() {
 void ST7789Display::turnOn() {
   if (!_isOn) {
     // Restore power to the display but keep backlight off
+  #if defined(PIN_TFT_VDD_CTL) && (PIN_TFT_VDD_CTL >= 0)
     digitalWrite(PIN_TFT_VDD_CTL, LOW);
+  #endif
     digitalWrite(PIN_TFT_RST, HIGH);
     
     // Re-initialize the display
@@ -57,7 +61,9 @@ void ST7789Display::turnOn() {
 }
 
 void ST7789Display::turnOff() {
+  #if defined(PIN_TFT_VDD_CTL) && (PIN_TFT_VDD_CTL >= 0)
   digitalWrite(PIN_TFT_VDD_CTL, HIGH);
+  #endif
 #ifdef PIN_TFT_LEDA_CTL_ACTIVE
   digitalWrite(PIN_TFT_LEDA_CTL, !PIN_TFT_LEDA_CTL_ACTIVE);
 #else

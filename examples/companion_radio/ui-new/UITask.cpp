@@ -2,6 +2,9 @@
 #include <helpers/TxtDataHelpers.h>
 #include "../MyMesh.h"
 #include "target.h"
+#ifdef M5STACK_CARDPUTER_ADV
+#include <M5Cardputer.h>
+#endif
 
 #ifndef AUTO_OFF_MILLIS
   #define AUTO_OFF_MILLIS     15000   // 15 seconds
@@ -27,6 +30,90 @@
 #endif
 
 #include "icons.h"
+
+#ifdef M5STACK_CARDPUTER_ADV
+static char mapCardputerKey(const Keyboard_Class::KeysState& status) {
+  for (uint8_t hid_key : status.hid_keys) {
+    switch (hid_key) {
+      case 0x50:  // HID left arrow
+        return KEY_LEFT;
+      case 0x4F:  // HID right arrow
+        return KEY_RIGHT;
+      case 0x52:  // HID up arrow
+        return KEY_UP;
+      case 0x51:  // HID down arrow
+        return KEY_DOWN;
+      case 0x29:  // HID Escape
+        return KEY_PREV;
+      default:
+        break;
+    }
+  }
+
+  if (status.enter) return KEY_ENTER;
+  if (status.tab) return KEY_NEXT;
+  if (status.del) return KEY_PREV;
+
+  for (char ch : status.word) {
+    switch (ch) {
+      case 'a':
+      case 'A':
+        return KEY_LEFT;
+      case 'd':
+      case 'D':
+        return KEY_RIGHT;
+      case 'w':
+      case 'W':
+        return KEY_UP;
+      case 's':
+      case 'S':
+        return KEY_DOWN;
+      case ',':
+        return KEY_LEFT;
+      case '<':
+        return KEY_LEFT;
+      case '.':
+        return KEY_DOWN;
+      case '>':
+        return KEY_DOWN;
+      case '/':
+        return KEY_RIGHT;
+      case '?':
+        return KEY_RIGHT;
+      case ';':
+        return KEY_UP;
+      case ':':
+        return KEY_UP;
+      case '`':
+        return KEY_PREV;
+      case 'q':
+      case 'Q':
+        return KEY_PREV;
+      case 'i':
+      case 'I':
+        return KEY_UP;
+      case 'j':
+      case 'J':
+        return KEY_LEFT;
+      case 'k':
+      case 'K':
+        return KEY_DOWN;
+      case 'l':
+      case 'L':
+        return KEY_RIGHT;
+      case 'e':
+      case 'E':
+        return KEY_NEXT;
+      case ' ':
+        return KEY_ENTER;
+      default:
+        break;
+    }
+  }
+
+  return 0;
+}
+#endif
 
 class SplashScreen : public UIScreen {
   UITask* _task;
@@ -677,6 +764,19 @@ bool UITask::isButtonPressed() const {
 
 void UITask::loop() {
   char c = 0;
+#ifdef M5STACK_CARDPUTER_ADV
+  M5Cardputer.update();
+  static bool kb_seen = false;
+  static uint32_t next_kb_init = 0;
+  if (!kb_seen) {
+    if (M5Cardputer.Keyboard.isPressed() || M5Cardputer.Keyboard.isChange()) {
+      kb_seen = true;
+    } else if (millis() >= next_kb_init) {
+      M5Cardputer.Keyboard.begin();
+      next_kb_init = millis() + 2000;
+    }
+  }
+#endif
 #if UI_HAS_JOYSTICK
   int ev = user_btn.check();
   if (ev == BUTTON_EVENT_CLICK) {
@@ -736,6 +836,16 @@ void UITask::loop() {
     expander.digitalWrite(EXP_PIN_BACKLIGHT, !touch_state);
 #endif
     next_backlight_btn_check = millis() + 300;
+  }
+#endif
+
+#ifdef M5STACK_CARDPUTER_ADV
+  if (c == 0 && M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+    auto& status = M5Cardputer.Keyboard.keysState();
+    c = mapCardputerKey(status);
+    if (c != 0) {
+      c = checkDisplayOn(c);
+    }
   }
 #endif
 
