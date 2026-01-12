@@ -56,18 +56,19 @@ static char mapCardputerKey(const Keyboard_Class::KeysState& status) {
 
   for (char ch : status.word) {
     switch (ch) {
-      case 'a':
-      case 'A':
-        return KEY_LEFT;
-      case 'd':
-      case 'D':
-        return KEY_RIGHT;
-      case 'w':
-      case 'W':
-        return KEY_UP;
-      case 's':
-      case 'S':
-        return KEY_DOWN;
+      // WASD removed - these are needed for typing messages
+      // case 'a':
+      // case 'A':
+      //   return KEY_LEFT;
+      // case 'd':
+      // case 'D':
+      //   return KEY_RIGHT;
+      // case 'w':
+      // case 'W':
+      //   return KEY_UP;
+      // case 's':
+      // case 'S':
+      //   return KEY_DOWN;
       case ',':
         return KEY_LEFT;
       case '<':
@@ -682,37 +683,8 @@ public:
     return 200;
   }
 
-  bool handleInput(char c) override {
-    // Navigation key handling
-    if (c == KEY_PREV || c == KEY_LEFT) {
-      _task->gotoHomeScreen();
-      return true;
-    }
-
-    if (c == KEY_ENTER) {
-      if (strlen(input_buffer) > 0 && recipient != NULL) {
-        // Send the message
-        uint32_t timestamp = rtc_clock.getCurrentTime();
-        uint32_t expected_ack = 0;
-        uint32_t est_timeout = 0;
-
-        int result = the_mesh.sendMessage(*recipient, timestamp, 0, input_buffer, expected_ack, est_timeout);
-
-        if (result >= 0) {
-          _task->showAlert("Message sent!", 2000);
-        } else {
-          _task->showAlert("Send failed", 2000);
-        }
-
-        _task->gotoHomeScreen();
-        return true;
-      } else if (recipient == NULL) {
-        _task->showAlert("No recipient!", 2000);
-      }
-      return true;
-    }
-
-    // Check for actual keyboard input from Cardputer
+  void poll() override {
+    // Poll keyboard in poll() instead of handleInput() to avoid main loop interference
     if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
       auto& status = M5Cardputer.Keyboard.keysState();
 
@@ -723,13 +695,45 @@ public:
           cursor_pos--;
           input_buffer[cursor_pos] = 0;
         }
-        return true;
+        return;
       }
 
       // Check for Shift/Fn key
       if (status.fn) {
         shift_active = !shift_active;
-        return true;
+        return;
+      }
+
+      // Handle Enter key - send message
+      if (status.enter) {
+        if (strlen(input_buffer) > 0 && recipient != NULL) {
+          // Send the message
+          uint32_t timestamp = rtc_clock.getCurrentTime();
+          uint32_t expected_ack = 0;
+          uint32_t est_timeout = 0;
+
+          int result = the_mesh.sendMessage(*recipient, timestamp, 0, input_buffer, expected_ack, est_timeout);
+
+          if (result >= 0) {
+            _task->showAlert("Message sent!", 2000);
+          } else {
+            _task->showAlert("Send failed", 2000);
+          }
+
+          _task->gotoHomeScreen();
+          return;
+        } else if (recipient == NULL) {
+          _task->showAlert("No recipient!", 2000);
+        }
+        return;
+      }
+
+      // Handle ESC key (HID code 0x29) - cancel
+      for (uint8_t hid_key : status.hid_keys) {
+        if (hid_key == 0x29) {  // HID Escape key
+          _task->gotoHomeScreen();
+          return;
+        }
       }
 
       // Handle regular character input
@@ -752,7 +756,13 @@ public:
           input_buffer[cursor_pos] = 0;
         }
       }
+    }
+  }
 
+  bool handleInput(char c) override {
+    // Navigation key handling from mapped keys (arrow keys, etc)
+    if (c == KEY_PREV || c == KEY_LEFT) {
+      _task->gotoHomeScreen();
       return true;
     }
 
@@ -766,41 +776,60 @@ class ContactSelectScreen : public UIScreen {
   ContactInfo contacts[10];
   int num_contacts;
   int selected_idx;
+  int page_offset;
+  int total_contacts;
 
 public:
   ContactSelectScreen(UITask* task, TextInputScreen* text_input)
-    : _task(task), _text_input(text_input), num_contacts(0), selected_idx(0) {}
+    : _task(task), _text_input(text_input), num_contacts(0), selected_idx(0), page_offset(0), total_contacts(0) {}
 
   void refresh() {
-    // Get recent contacts from the mesh
-    AdvertPath recent[10];
-    the_mesh.getRecentlyHeard(recent, 10);
+    // Get stored contacts from the mesh
+    total_contacts = the_mesh.getNumContacts();
+    page_offset = 0;
+    loadPage();
+  }
 
+  void loadPage() {
+    // Load contacts for current page
     num_contacts = 0;
-    for (int i = 0; i < 10; i++) {
-      if (recent[i].name[0] != 0) {
-        // Look up full contact info
-        ContactInfo* c = the_mesh.lookupContactByPubKey(recent[i].pubkey_prefix, 7);
-        if (c != NULL) {
-          contacts[num_contacts++] = *c;
-        }
+    int start_idx = page_offset;
+    int end_idx = min(start_idx + 10, total_contacts);
+
+    for (int i = start_idx; i < end_idx; i++) {
+      ContactInfo contact;
+      if (the_mesh.getContactByIdx(i, contact)) {
+        contacts[num_contacts++] = contact;
       }
     }
 
-    selected_idx = 0;
+    // Adjust selected_idx if it's out of bounds
+    if (selected_idx >= num_contacts) {
+      selected_idx = num_contacts > 0 ? num_contacts - 1 : 0;
+    }
   }
 
   int render(DisplayDriver& display) override {
     display.setTextSize(1);
     display.setColor(DisplayDriver::GREEN);
     display.setCursor(0, 0);
-    display.print("Select Recipient:");
+
+    char header[40];
+    if (total_contacts > 0) {
+      int current_page = (page_offset / 10) + 1;
+      int total_pages = (total_contacts + 9) / 10; // Ceiling division
+      snprintf(header, sizeof(header), "Contacts: %d/%d (p%d)", page_offset + selected_idx + 1, total_contacts, current_page);
+    } else {
+      snprintf(header, sizeof(header), "Select Recipient");
+    }
+    display.print(header);
 
     display.setColor(DisplayDriver::LIGHT);
     display.drawRect(0, 11, display.width(), 1);
 
     int y = 14;
-    for (int i = 0; i < num_contacts && i < 4; i++) {
+    int display_count = min(num_contacts, 4); // Show max 4 contacts on screen
+    for (int i = 0; i < display_count; i++) {
       if (i == selected_idx) {
         display.setColor(DisplayDriver::YELLOW);
         display.setCursor(0, y);
@@ -821,7 +850,12 @@ public:
       display.setCursor(0, 20);
       display.print("No contacts found");
       display.setCursor(0, 32);
-      display.print("Press ESC to go back");
+      display.print("Add contacts via app");
+    } else if (total_contacts > 4) {
+      // Show scroll indicator
+      display.setColor(DisplayDriver::BLUE);
+      display.setCursor(0, display.height() - 10);
+      display.print("Use arrows to scroll");
     }
 
     return 500;
@@ -834,12 +868,28 @@ public:
     }
 
     if (c == KEY_UP) {
-      if (selected_idx > 0) selected_idx--;
+      if (selected_idx > 0) {
+        selected_idx--;
+      } else if (page_offset > 0) {
+        // Scroll to previous page
+        page_offset -= 10;
+        if (page_offset < 0) page_offset = 0;
+        loadPage();
+        selected_idx = min(3, num_contacts - 1); // Position at bottom of screen
+      }
       return true;
     }
 
     if (c == KEY_DOWN) {
-      if (selected_idx < num_contacts - 1) selected_idx++;
+      if (selected_idx < min(num_contacts - 1, 3)) {
+        // Can still scroll down on current page
+        selected_idx++;
+      } else if (page_offset + num_contacts < total_contacts) {
+        // Load next page
+        page_offset += 10;
+        loadPage();
+        selected_idx = 0; // Position at top of screen
+      }
       return true;
     }
 
@@ -1101,7 +1151,8 @@ void UITask::loop() {
 #endif
 
 #ifdef M5STACK_CARDPUTER_ADV
-  if (c == 0 && M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+  // Skip keyboard handling if on text_input screen - it polls keyboard in poll() method
+  if (c == 0 && curr != text_input && M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
     auto& status = M5Cardputer.Keyboard.keysState();
 
     // Check for 'm' key to start composing (works from home screen only)
@@ -1119,6 +1170,7 @@ void UITask::loop() {
       }
     }
 
+    // Map keyboard to navigation keys
     c = mapCardputerKey(status);
     if (c != 0) {
       c = checkDisplayOn(c);
