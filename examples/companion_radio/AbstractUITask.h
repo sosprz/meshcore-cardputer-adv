@@ -43,4 +43,9 @@ public:
   virtual void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) = 0;
   virtual void notify(UIEventType t = UIEventType::none) = 0;
   virtual void loop() = 0;
+
+#ifdef M5STACK_CARDPUTER_ADV
+  // Optional: store channel messages locally for on-device viewing
+  virtual void newChannelMessage(uint8_t channel_idx, uint8_t path_len, int8_t snr, uint32_t timestamp, const char* text) { }
+#endif
 };

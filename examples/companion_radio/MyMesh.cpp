@@ -473,6 +473,15 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     if (_ui) _ui->notify(UIEventType::channelMessage);
 #endif
   }
+
+#ifdef M5STACK_CARDPUTER_ADV
+  // Store channel message locally for on-device viewing
+  if (_ui) {
+    int8_t snr = (int8_t)(pkt->getSNR() * 4);
+    _ui->newChannelMessage(channel_idx, path_len, snr, timestamp, text);
+  }
+#endif
+
 #ifdef DISPLAY_CLASS
   // Get the channel name from the channel index
   const char *channel_name = "Unknown";

@@ -52,6 +52,8 @@ class UITask : public AbstractUITask {
 #ifdef M5STACK_CARDPUTER_ADV
   UIScreen* text_input;
   UIScreen* contact_select;
+  UIScreen* channel_list;
+  UIScreen* channel_msg;
 #endif
 
   void userLedHandler();
@@ -77,9 +79,27 @@ public:
   bool hasDisplay() const { return _display != NULL; }
   bool isButtonPressed() const;
   void setCurrScreen(UIScreen* c);
+  void wakeDisplay();
 
 #ifdef M5STACK_CARDPUTER_ADV
+  // Channel message storage
+  struct ChannelMessage {
+    uint8_t channel_idx;
+    uint8_t path_len;
+    int8_t snr;
+    uint32_t timestamp;
+    char text[128];
+    bool valid;
+  };
+  #define CHANNEL_MSG_BUFFER_SIZE 20
+  ChannelMessage channel_msg_buffer[CHANNEL_MSG_BUFFER_SIZE];
+  int channel_msg_write_idx;
+
   void startComposingMessage();
+  void startComposingChannel(uint8_t channel_idx);
+  void startViewingChannels();
+  void newChannelMessage(uint8_t channel_idx, uint8_t path_len, int8_t snr, uint32_t timestamp, const char* text);
+  int getChannelMessageCount(uint8_t channel_idx);
 #endif
 
   void toggleBuzzer();

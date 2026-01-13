@@ -164,6 +164,10 @@ class HomeScreen : public UIScreen {
   enum HomePage {
     FIRST,
     RECENT,
+#ifdef M5STACK_CARDPUTER_ADV
+    MESSAGES,
+    CHANNELS,
+#endif
     RADIO,
     BLUETOOTH,
     ADVERT,
@@ -305,16 +309,41 @@ public:
         } else {
           sprintf(tmp, "%dh", secs / (60*60));
         }
-        
+
         int timestamp_width = display.getTextWidth(tmp);
         int max_name_width = display.width() - timestamp_width - 1;
-        
+
         char filtered_recent_name[sizeof(a->name)];
         display.translateUTF8ToBlocks(filtered_recent_name, a->name, sizeof(filtered_recent_name));
         display.drawTextEllipsized(0, y, max_name_width, filtered_recent_name);
         display.setCursor(display.width() - timestamp_width - 1, y);
         display.print(tmp);
       }
+#ifdef M5STACK_CARDPUTER_ADV
+    } else if (_page == HomePage::MESSAGES) {
+      display.setColor(DisplayDriver::YELLOW);
+      display.setTextSize(2);
+      display.drawTextCentered(display.width() / 2, 22, "Send Message");
+      display.setTextSize(1);
+      display.setColor(DisplayDriver::GREEN);
+      display.drawTextCentered(display.width() / 2, 45, "Press " PRESS_LABEL " to compose");
+    } else if (_page == HomePage::CHANNELS) {
+      display.setColor(DisplayDriver::YELLOW);
+      display.setTextSize(2);
+      display.drawTextCentered(display.width() / 2, 22, "Channels");
+      display.setTextSize(1);
+      display.setColor(DisplayDriver::GREEN);
+      int num_channels = 0;
+      for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+        ChannelDetails ch;
+        if (the_mesh.getChannel(i, ch) && ch.name[0] != '\0') {
+          num_channels++;
+        }
+      }
+      sprintf(tmp, "%d channel(s)", num_channels);
+      display.drawTextCentered(display.width() / 2, 38, tmp);
+      display.drawTextCentered(display.width() / 2, 50, "Press " PRESS_LABEL " to view");
+#endif
     } else if (_page == HomePage::RADIO) {
       display.setColor(DisplayDriver::YELLOW);
       display.setTextSize(1);
@@ -515,6 +544,16 @@ public:
       _shutdown_init = true;  // need to wait for button to be released
       return true;
     }
+#ifdef M5STACK_CARDPUTER_ADV
+    if (c == KEY_ENTER && _page == HomePage::MESSAGES) {
+      _task->startComposingMessage();
+      return true;
+    }
+    if (c == KEY_ENTER && _page == HomePage::CHANNELS) {
+      _task->startViewingChannels();
+      return true;
+    }
+#endif
 
     return false;
   }
@@ -624,6 +663,10 @@ class TextInputScreen : public UIScreen {
   int scroll_offset;
   bool shift_active;
   ContactInfo* recipient;
+  bool channel_mode;
+  uint8_t channel_idx;
+  char channel_name[32];
+  UIScreen* return_screen;
 
 public:
   TextInputScreen(UITask* task) : _task(task) {
@@ -632,27 +675,52 @@ public:
     scroll_offset = 0;
     shift_active = false;
     recipient = NULL;
+    channel_mode = false;
+    channel_idx = 0;
+    channel_name[0] = '\0';
+    return_screen = NULL;
   }
 
   void setRecipient(ContactInfo* r) {
     recipient = r;
+    channel_mode = false;
     input_buffer[0] = 0;
     cursor_pos = 0;
     scroll_offset = 0;
   }
+
+  void setChannel(uint8_t idx) {
+    channel_mode = true;
+    channel_idx = idx;
+    recipient = NULL;
+    ChannelDetails ch;
+    if (the_mesh.getChannel(idx, ch)) {
+      strncpy(channel_name, ch.name, sizeof(channel_name) - 1);
+      channel_name[sizeof(channel_name) - 1] = '\0';
+    } else {
+      snprintf(channel_name, sizeof(channel_name), "Channel %d", idx);
+    }
+    input_buffer[0] = 0;
+    cursor_pos = 0;
+    scroll_offset = 0;
+  }
+
+  void setReturnScreen(UIScreen* screen) { return_screen = screen; }
 
   int render(DisplayDriver& display) override {
     display.setTextSize(1);
     display.setColor(DisplayDriver::GREEN);
     display.setCursor(0, 0);
 
-    if (recipient) {
-      char header[40];
+    char header[40];
+    if (channel_mode) {
+      snprintf(header, sizeof(header), "Ch: %.25s", channel_name);
+    } else if (recipient) {
       snprintf(header, sizeof(header), "To: %.25s", recipient->name);
-      display.print(header);
     } else {
-      display.print("Compose Message");
+      snprintf(header, sizeof(header), "Compose Message");
     }
+    display.print(header);
 
     // Draw horizontal line
     display.setColor(DisplayDriver::LIGHT);
@@ -686,6 +754,7 @@ public:
   void poll() override {
     // Poll keyboard in poll() instead of handleInput() to avoid main loop interference
     if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+      _task->wakeDisplay();
       auto& status = M5Cardputer.Keyboard.keysState();
 
       // Handle special keys
@@ -706,24 +775,35 @@ public:
 
       // Handle Enter key - send message
       if (status.enter) {
-        if (strlen(input_buffer) > 0 && recipient != NULL) {
-          // Send the message
+        if (strlen(input_buffer) > 0) {
           uint32_t timestamp = rtc_clock.getCurrentTime();
-          uint32_t expected_ack = 0;
-          uint32_t est_timeout = 0;
-
-          int result = the_mesh.sendMessage(*recipient, timestamp, 0, input_buffer, expected_ack, est_timeout);
-
-          if (result >= 0) {
-            _task->showAlert("Message sent!", 2000);
+          if (channel_mode) {
+            ChannelDetails ch;
+            if (the_mesh.getChannel(channel_idx, ch) &&
+                the_mesh.sendGroupMessage(timestamp, ch.channel, the_mesh.getNodeName(), input_buffer, strlen(input_buffer))) {
+              _task->newChannelMessage(channel_idx, 0xFF, 0, timestamp, input_buffer);
+              _task->showAlert("Channel sent!", 2000);
+            } else {
+              _task->showAlert("Send failed", 2000);
+            }
+          } else if (recipient != NULL) {
+            uint32_t expected_ack = 0;
+            uint32_t est_timeout = 0;
+            int result = the_mesh.sendMessage(*recipient, timestamp, 0, input_buffer, expected_ack, est_timeout);
+            if (result >= 0) {
+              _task->showAlert("Message sent!", 2000);
+            } else {
+              _task->showAlert("Send failed", 2000);
+            }
           } else {
-            _task->showAlert("Send failed", 2000);
+            _task->showAlert("No recipient!", 2000);
           }
-
-          _task->gotoHomeScreen();
+          if (return_screen) {
+            _task->setCurrScreen(return_screen);
+          } else {
+            _task->gotoHomeScreen();
+          }
           return;
-        } else if (recipient == NULL) {
-          _task->showAlert("No recipient!", 2000);
         }
         return;
       }
@@ -731,7 +811,11 @@ public:
       // Handle ESC key (HID code 0x29) - cancel
       for (uint8_t hid_key : status.hid_keys) {
         if (hid_key == 0x29) {  // HID Escape key
-          _task->gotoHomeScreen();
+          if (return_screen) {
+            _task->setCurrScreen(return_screen);
+          } else {
+            _task->gotoHomeScreen();
+          }
           return;
         }
       }
@@ -744,6 +828,14 @@ public:
         // Skip special characters that might cause issues
         if (ch == '\r' || ch == '\n' || ch == '\t') {
           continue;
+        }
+        if (ch == '`') {
+          if (return_screen) {
+            _task->setCurrScreen(return_screen);
+          } else {
+            _task->gotoHomeScreen();
+          }
+          return;
         }
 
         if (cursor_pos < sizeof(input_buffer) - 1) {
@@ -762,7 +854,11 @@ public:
   bool handleInput(char c) override {
     // Navigation key handling from mapped keys (arrow keys, etc)
     if (c == KEY_PREV || c == KEY_LEFT) {
-      _task->gotoHomeScreen();
+      if (return_screen) {
+        _task->setCurrScreen(return_screen);
+      } else {
+        _task->gotoHomeScreen();
+      }
       return true;
     }
 
@@ -896,7 +992,362 @@ public:
     if (c == KEY_ENTER || c == KEY_RIGHT) {
       if (num_contacts > 0 && selected_idx < num_contacts) {
         _text_input->setRecipient(&contacts[selected_idx]);
+        _text_input->setReturnScreen(NULL);
         _task->setCurrScreen(_text_input);
+      }
+      return true;
+    }
+
+    return false;
+  }
+};
+
+// ============================================================================
+// ChannelMessageScreen - View messages for a specific channel
+// ============================================================================
+class ChannelMessageScreen : public UIScreen {
+  UITask* _task;
+  UIScreen* _channel_list;
+  uint8_t current_channel_idx;
+  char channel_name[32];
+  int scroll_offset;
+  int visible_messages;
+
+  struct DisplayMessage {
+    uint32_t timestamp;
+    int8_t snr;
+    uint8_t path_len;
+    char text[128];
+  };
+  DisplayMessage messages[CHANNEL_MSG_BUFFER_SIZE];
+  int num_messages;
+
+public:
+  ChannelMessageScreen(UITask* task, UIScreen* channel_list)
+    : _task(task), _channel_list(channel_list), current_channel_idx(0), scroll_offset(0), visible_messages(1) {
+    channel_name[0] = '\0';
+    num_messages = 0;
+  }
+
+  void setChannel(uint8_t channel_idx) {
+    current_channel_idx = channel_idx;
+    scroll_offset = 0;
+
+    // Get channel name
+    ChannelDetails ch;
+    if (the_mesh.getChannel(channel_idx, ch)) {
+      strncpy(channel_name, ch.name, 31);
+      channel_name[31] = '\0';
+    } else {
+      snprintf(channel_name, sizeof(channel_name), "Channel %d", channel_idx);
+    }
+
+    // Load messages for this channel
+    loadMessages();
+  }
+
+  void loadMessages() {
+    num_messages = 0;
+
+    // Collect all messages for this channel from the buffer
+    for (int i = 0; i < CHANNEL_MSG_BUFFER_SIZE; i++) {
+      const auto& msg = _task->channel_msg_buffer[i];
+      if (msg.valid && msg.channel_idx == current_channel_idx) {
+        messages[num_messages].timestamp = msg.timestamp;
+        messages[num_messages].snr = msg.snr;
+        messages[num_messages].path_len = msg.path_len;
+        strncpy(messages[num_messages].text, msg.text, 127);
+        messages[num_messages].text[127] = '\0';
+        num_messages++;
+      }
+    }
+
+    // Sort by timestamp (newest first) - simple bubble sort
+    for (int i = 0; i < num_messages - 1; i++) {
+      for (int j = 0; j < num_messages - i - 1; j++) {
+        if (messages[j].timestamp < messages[j + 1].timestamp) {
+          DisplayMessage temp = messages[j];
+          messages[j] = messages[j + 1];
+          messages[j + 1] = temp;
+        }
+      }
+    }
+  }
+
+  int render(DisplayDriver& display) override {
+    display.clear();
+    display.setTextSize(1);
+    display.setColor(DisplayDriver::LIGHT);
+
+    // Header with channel name
+    display.setCursor(2, 2);
+    char header[30];
+    strncpy(header, channel_name, 29);
+    header[29] = '\0';
+    display.print(header);
+
+    if (num_messages == 0) {
+      display.setCursor(5, 20);
+      display.print("No messages");
+      display.setCursor(5, 35);
+      display.print("Enter=compose");
+      return 0;
+    }
+
+    // Display messages
+    int y = 15;
+    const int line_height = 11;
+    const int msg_spacing = 3;
+    const int footer_height = 10;
+    const int msg_block_height = line_height * 2 + msg_spacing;
+    const int available_height = display.height() - footer_height - y;
+    visible_messages = max(1, available_height / msg_block_height);
+
+    int start_idx = scroll_offset;
+    int end_idx = min(num_messages, start_idx + visible_messages);
+
+    for (int i = start_idx; i < end_idx; i++) {
+      if (y + msg_block_height > display.height() - footer_height) break;
+      // Timestamp + SNR + path length
+      display.setCursor(2, y);
+
+      // Convert timestamp to relative time (assuming it's seconds since epoch)
+      uint32_t now = millis() / 1000;
+      uint32_t age_secs = (now > messages[i].timestamp) ? (now - messages[i].timestamp) : 0;
+
+      char info[40];
+      if (age_secs < 60) {
+        snprintf(info, sizeof(info), "%lus", age_secs);
+      } else if (age_secs < 3600) {
+        snprintf(info, sizeof(info), "%lum", age_secs / 60);
+      } else {
+        snprintf(info, sizeof(info), "%luh", age_secs / 3600);
+      }
+
+      // Add SNR and hops
+      char snr_str[10];
+      snprintf(snr_str, sizeof(snr_str), " %ddB", (int)(messages[i].snr / 4));
+      strcat(info, snr_str);
+
+      if (messages[i].path_len < 0xFF) {
+        char hop_str[10];
+        snprintf(hop_str, sizeof(hop_str), " %dh", messages[i].path_len);
+        strcat(info, hop_str);
+      }
+
+      display.print(info);
+      y += line_height;
+
+      // Message text (word wrap if needed)
+      display.setCursor(5, y);
+
+      // Truncate long messages
+      char text_buf[100];
+      strncpy(text_buf, messages[i].text, 99);
+      text_buf[99] = '\0';
+
+      // Simple word wrap - if too long, truncate with "..."
+      if (strlen(text_buf) > 35) {
+        text_buf[32] = '.';
+        text_buf[33] = '.';
+        text_buf[34] = '.';
+        text_buf[35] = '\0';
+      }
+
+      display.print(text_buf);
+      y += line_height;
+
+      // Add spacing between messages
+      y += msg_spacing;
+    }
+
+    // Footer with navigation
+    display.setCursor(2, display.height() - 10);
+    if (num_messages > visible_messages) {
+      display.print("^/v scroll  Enter=compose");
+    } else {
+      display.print("Enter=compose  ESC=back");
+    }
+
+    return 0;
+  }
+
+  bool handleInput(char c) override {
+    if (c == KEY_ENTER) {
+      _task->startComposingChannel(current_channel_idx);
+      return true;
+    }
+
+    if (c == KEY_UP) {
+      if (scroll_offset > 0) {
+        scroll_offset--;
+      }
+      return true;
+    }
+
+    if (c == KEY_DOWN) {
+      if (scroll_offset < num_messages - visible_messages) {
+        scroll_offset++;
+      }
+      return true;
+    }
+
+    if (c == KEY_PREV || c == KEY_LEFT) {
+      _task->setCurrScreen(_channel_list);
+      return true;
+    }
+
+    return false;
+  }
+
+  void poll() override {
+    // Refresh messages periodically in case new ones arrived
+    static unsigned long last_refresh = 0;
+    if (millis() - last_refresh > 2000) {
+      loadMessages();
+      last_refresh = millis();
+    }
+  }
+};
+
+// ============================================================================
+// ChannelListScreen - Browse and select channels
+// ============================================================================
+class ChannelListScreen : public UIScreen {
+  UITask* _task;
+  UIScreen* _channel_msg;
+  ChannelDetails channels[MAX_GROUP_CHANNELS];
+  uint8_t channel_indices[MAX_GROUP_CHANNELS];  // Track actual channel indices
+  int num_channels;
+  int selected_idx;
+
+public:
+  ChannelListScreen(UITask* task, UIScreen* channel_msg) : _task(task), _channel_msg(channel_msg) {
+    num_channels = 0;
+    selected_idx = 0;
+  }
+
+  void setChannelMsgScreen(UIScreen* screen) { _channel_msg = screen; }
+
+  void refresh() {
+    num_channels = 0;
+    selected_idx = 0;
+
+    // Load all configured channels
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+      ChannelDetails ch;
+      if (the_mesh.getChannel(i, ch) && ch.name[0] != '\0') {
+        channels[num_channels] = ch;
+        channel_indices[num_channels] = i;  // Store actual channel index
+        num_channels++;
+      }
+    }
+  }
+
+  int render(DisplayDriver& display) override {
+    display.clear();
+    display.setTextSize(1);
+    display.setColor(DisplayDriver::LIGHT);
+
+    if (num_channels == 0) {
+      display.setCursor(5, 10);
+      display.print("No channels configured");
+      display.setCursor(5, 25);
+      display.print("Use companion app to");
+      display.setCursor(5, 40);
+      display.print("add channels");
+      return 0;
+    }
+
+    // Header
+    display.setCursor(2, 2);
+    char header[40];
+    sprintf(header, "Channels: %d", num_channels);
+    display.print(header);
+
+    // Show up to 5 channels at a time
+    int start_idx = max(0, selected_idx - 2);
+    int end_idx = min(num_channels, start_idx + 5);
+
+    int y = 15;
+    for (int i = start_idx; i < end_idx; i++) {
+      bool is_selected = (i == selected_idx);
+
+      if (is_selected) {
+        display.fillRect(0, y - 2, display.width(), 12);
+        display.setColor(DisplayDriver::DARK);
+      } else {
+        display.setColor(DisplayDriver::LIGHT);
+      }
+
+      display.setCursor(5, y);
+
+      // Channel name (truncate if too long)
+      char name_buf[40];
+      strncpy(name_buf, channels[i].name, 24);
+      name_buf[24] = '\0';
+
+      // Add message count using actual channel index
+      int msg_count = _task->getChannelMessageCount(channel_indices[i]);
+      if (msg_count > 0) {
+        char count_str[10];
+        sprintf(count_str, " (%d)", msg_count);
+        strcat(name_buf, count_str);
+      }
+
+      display.print(name_buf);
+
+      if (is_selected) {
+        display.setColor(DisplayDriver::LIGHT);
+      }
+
+      y += 12;
+    }
+
+    // Scroll indicator
+    display.setCursor(2, display.height() - 10);
+    if (num_channels > 5) {
+      display.print("^/v scroll  Enter=view");
+    } else {
+      display.print("Enter=view  ESC=back");
+    }
+
+    return 0;
+  }
+
+  bool handleInput(char c) override {
+    if (num_channels == 0) {
+      if (c == KEY_PREV || c == KEY_LEFT) {
+        _task->gotoHomeScreen();
+        return true;
+      }
+      return false;
+    }
+
+    if (c == KEY_UP) {
+      if (selected_idx > 0) {
+        selected_idx--;
+      }
+      return true;
+    }
+
+    if (c == KEY_DOWN) {
+      if (selected_idx < num_channels - 1) {
+        selected_idx++;
+      }
+      return true;
+    }
+
+    if (c == KEY_PREV || c == KEY_LEFT) {
+      _task->gotoHomeScreen();
+      return true;
+    }
+
+    if (c == KEY_ENTER || c == KEY_RIGHT) {
+      if (num_channels > 0 && selected_idx < num_channels) {
+        // Set selected channel and switch to message view (use actual channel index)
+        ((ChannelMessageScreen*)_channel_msg)->setChannel(channel_indices[selected_idx]);
+        _task->setCurrScreen(_channel_msg);
       }
       return true;
     }
@@ -945,6 +1396,17 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 #ifdef M5STACK_CARDPUTER_ADV
   text_input = new TextInputScreen(this);
   contact_select = new ContactSelectScreen(this, (TextInputScreen*)text_input);
+
+  // Create channel screens with forward/back references
+  channel_list = new ChannelListScreen(this, NULL);  // Will set channel_msg later
+  channel_msg = new ChannelMessageScreen(this, channel_list);
+  ((ChannelListScreen*)channel_list)->setChannelMsgScreen(channel_msg);  // Set forward reference
+
+  // Initialize channel message buffer
+  channel_msg_write_idx = 0;
+  for (int i = 0; i < CHANNEL_MSG_BUFFER_SIZE; i++) {
+    channel_msg_buffer[i].valid = false;
+  }
 #endif
 
   setCurrScreen(splash);
@@ -1031,10 +1493,49 @@ void UITask::setCurrScreen(UIScreen* c) {
   _next_refresh = 100;
 }
 
+void UITask::wakeDisplay() {
+  checkDisplayOn(0);
+}
+
 #ifdef M5STACK_CARDPUTER_ADV
 void UITask::startComposingMessage() {
   ((ContactSelectScreen*)contact_select)->refresh();
   setCurrScreen(contact_select);
+}
+
+void UITask::startComposingChannel(uint8_t channel_idx) {
+  ((TextInputScreen*)text_input)->setChannel(channel_idx);
+  ((TextInputScreen*)text_input)->setReturnScreen(channel_msg);
+  setCurrScreen(text_input);
+}
+
+void UITask::startViewingChannels() {
+  ((ChannelListScreen*)channel_list)->refresh();
+  setCurrScreen(channel_list);
+}
+
+void UITask::newChannelMessage(uint8_t channel_idx, uint8_t path_len, int8_t snr, uint32_t timestamp, const char* text) {
+  // Store message in circular buffer
+  channel_msg_buffer[channel_msg_write_idx].channel_idx = channel_idx;
+  channel_msg_buffer[channel_msg_write_idx].path_len = path_len;
+  channel_msg_buffer[channel_msg_write_idx].snr = snr;
+  channel_msg_buffer[channel_msg_write_idx].timestamp = timestamp;
+  strncpy(channel_msg_buffer[channel_msg_write_idx].text, text, 127);
+  channel_msg_buffer[channel_msg_write_idx].text[127] = '\0';
+  channel_msg_buffer[channel_msg_write_idx].valid = true;
+
+  // Advance write index (circular)
+  channel_msg_write_idx = (channel_msg_write_idx + 1) % CHANNEL_MSG_BUFFER_SIZE;
+}
+
+int UITask::getChannelMessageCount(uint8_t channel_idx) {
+  int count = 0;
+  for (int i = 0; i < CHANNEL_MSG_BUFFER_SIZE; i++) {
+    if (channel_msg_buffer[i].valid && channel_msg_buffer[i].channel_idx == channel_idx) {
+      count++;
+    }
+  }
+  return count;
 }
 #endif
 
@@ -1155,28 +1656,12 @@ void UITask::loop() {
   if (c == 0 && curr != text_input && M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
     auto& status = M5Cardputer.Keyboard.keysState();
 
-    // Check for 'm' key to start composing (works from home screen only)
-    if (curr == home) {
-      for (char ch : status.word) {
-        if (ch == 'm' || ch == 'M') {
-          if (_display && !_display->isOn()) {
-            _display->turnOn();
-          }
-          startComposingMessage();
-          _auto_off = millis() + AUTO_OFF_MILLIS;
-          _next_refresh = 100;
-          goto done_with_input;  // Skip normal input handling
-        }
-      }
-    }
-
     // Map keyboard to navigation keys
     c = mapCardputerKey(status);
     if (c != 0) {
       c = checkDisplayOn(c);
     }
   }
-done_with_input:
 #endif
 
   if (c != 0 && curr) {
